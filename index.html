@@ -532,11 +532,16 @@ function startHandTracking(){
     // ป้อนภาพจาก video ที่ connect ไว้แล้วเข้า MediaPipe เอง (ไม่ใช้ Camera util = ไม่ขอ permission ซ้ำ)
     var v=$('camVideo');
     handReady=true;
+    handBusy=false;                 // reset กันค้างจากรอบก่อน
     cancelAnimationFrame(handLoopId);
+    var lastSent=0;
     function feed(){
       if(!handMode){ return; }
+      var now=performance.now();
+      // ถ้า send ค้างเกิน 1.5 วิ ให้ปลดล็อก (กันลูปแฮงค์ทำภาพค้าง)
+      if(handBusy && now-lastSent>1500){ handBusy=false; }
       if(v.readyState>=2 && !handBusy){
-        handBusy=true;
+        handBusy=true; lastSent=now;
         hands.send({image:v}).then(function(){ handBusy=false; }).catch(function(){ handBusy=false; });
       }
       handLoopId=requestAnimationFrame(feed);
@@ -588,31 +593,55 @@ var diffCfg={
   hard:  {fall:7000,  spawnMs:780,  lureChance:.60, basePts:20}
 };
 
+// stream ยังใช้งานได้อยู่ไหม (track ยัง live)
+function streamLive(s){
+  if(!s) return false;
+  var t=s.getVideoTracks ? s.getVideoTracks() : [];
+  return t.length>0 && t[0].readyState==='live';
+}
+// ผูก stream เข้า video แล้วสั่งเล่นเสมอ (กันภาพค้าง/เฟรมเก่าตอนเล่นซ้ำ)
+function primeVideo(v, stream){
+  if(v.srcObject!==stream){ v.srcObject=stream; }
+  v.muted=true; v.playsInline=true;
+  var p=v.play();
+  if(p && p.catch) p.catch(function(){ /* บางเบราว์เซอร์ throw ถ้าเล่นซ้ำ ไม่เป็นไร */ });
+}
+function getFreshStream(cb){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){ cb(null); return; }
+  navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false})
+    .then(function(s){ camStream=s; camConnected=true; cb(s); })
+    .catch(function(){ camConnected=false; cb(null); });
+}
+
 function startCamera(){
   var v=$('camVideo'), noCam=$('noCamBg');
-  // โหมดนิ้ว: ใช้กล้อง + MediaPipe
-  if(handMode && handAvailable() && settings.cam){
+  if(!settings.cam){ noCam.style.display='block'; v.style.display='none'; return; }
+
+  function ready(stream){
+    if(!stream){ noCam.style.display='block'; v.style.display='none'; return; }
     noCam.style.display='none'; v.style.display='block';
-    startHandTracking();   // ใช้ stream เดิมที่ connect ไว้แล้ว
-    return;
+    primeVideo(v, stream);
+    if(handMode && handAvailable()) startHandTracking();
   }
-  // โหมดแตะ: ไม่ต้องเปิดกล้องก็ได้ — ถ้า connect ไว้แล้วก็โชว์เป็นฉากหลังเฉยๆ
-  if(settings.cam && camConnected && camStream){
-    v.srcObject=camStream; v.style.display='block'; noCam.style.display='none';
-  }else if(settings.cam && navigator.mediaDevices && navigator.mediaDevices.getUserMedia){
-    navigator.mediaDevices.getUserMedia({video:{facingMode:'user'},audio:false})
-      .then(function(s){ camStream=s; camConnected=true; v.srcObject=s; v.style.display='block'; noCam.style.display='none'; })
-      .catch(function(){ noCam.style.display='block'; v.style.display='none'; });
+
+  // ถ้ามี stream เดิมและยัง live ใช้ต่อได้เลย; ถ้าตายแล้วขอใหม่
+  if(camConnected && streamLive(camStream)){
+    ready(camStream);
   }else{
-    noCam.style.display='block'; v.style.display='none';
+    // stream เก่าใช้ไม่ได้ -> ปิดทิ้งแล้วขอใหม่ (เคสภาพค้าง/track หลุด)
+    if(camStream){ try{ camStream.getTracks().forEach(function(t){t.stop();}); }catch(e){} camStream=null; }
+    camConnected=false;
+    getFreshStream(ready);
   }
 }
-// จบเกม: หยุดแค่ hand-tracking — แต่ "ไม่ปิด" stream กล้องที่ connect ไว้ (จะได้ไม่ต้องขอ permission ใหม่)
-function pauseCamera(){ stopHandTracking(); }
-// ปิดกล้องจริงๆ ตอนออกจากหน้า
+// จบเกม: หยุดแค่ hand-tracking — ปล่อยให้วิดีโอเล่นต่อ (ไม่ pause กันภาพค้างตอนเล่นซ้ำ)
+function pauseCamera(){
+  stopHandTracking();
+}
+// ปิดกล้องจริงๆ ตอนออกจากหน้า/รีเฟรช
 function stopCamera(){
   stopHandTracking();
-  try{ var v=$('camVideo'); if(v) v.srcObject=null; }catch(e){}
+  try{ var v=$('camVideo'); if(v){ v.pause&&v.pause(); v.srcObject=null; } }catch(e){}
   if(camStream){ camStream.getTracks().forEach(function(t){t.stop();}); camStream=null; }
   camConnected=false;
 }
